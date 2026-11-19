@@ -1,0 +1,22 @@
+{
+  "name": "NUSAL - Nutrición & Salud",
+  "short_name": "NUSAL",
+  "description": "Tu espacio de nutrición y salud",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F2F2F7",
+  "theme_color": "#7B2D8E",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

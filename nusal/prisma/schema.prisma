@@ -1,0 +1,507 @@
+// ================================================================
+// NUSAL — Esquema de base de datos (Prisma + PostgreSQL)
+// Ingredientes guardados como JSON estructurado:
+//   [{ nombre, cantidad, unidad, categoria }]
+// ================================================================
+
+generator client {
+  provider        = "prisma-client-js"
+  // Motor de consultas en WebAssembly + controlador pg (sin binarios nativos: válido en Netlify Functions)
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  admin
+  medico
+  patient
+}
+
+enum MealType {
+  DESAYUNO
+  MEDIA_MANANA
+  COMIDA
+  MERIENDA
+  CENA
+}
+
+enum TrafficLight {
+  green
+  yellow
+  red
+}
+
+// ── Clínica (multi-tenant preparado) ──
+model Clinic {
+  id        String    @id @default(uuid())
+  name      String    @default("NUSAL")
+  whatsapp  String?
+  createdAt DateTime  @default(now())
+
+  users     User[]
+  patients  Patient[]
+  meals     MealBank[]
+  recipes   Recipe[]
+  diets     WeeklyDiet[]
+  faqs      Faq[]
+  resources Resource[]
+}
+
+// ── Usuario (reemplaza a Supabase Auth) ──
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(patient)
+  fullName     String
+  clinicId     String?
+  clinic       Clinic?  @relation(fields: [clinicId], references: [id])
+  twoFactorSecret  String?
+  twoFactorEnabled Boolean @default(false)
+  disabled         Boolean  @default(false)
+  calendarTokenHash String? @unique // enlace privado de calendario (solo se guarda el hash) // cuenta dada de baja: no puede entrar
+  homeLayout       Json?    // widgets elegidos por el usuario para su pantalla de inicio
+
+  // Recuperación de contraseña (código por email)
+  resetCodeHash    String?
+  resetExpires     DateTime?
+  resetAttempts    Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  patient      Patient?
+}
+
+// ── Ficha clínica del paciente ──
+model Patient {
+  id            String        @id @default(uuid())
+  userId        String        @unique
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  clinicId      String?
+  clinic        Clinic?       @relation(fields: [clinicId], references: [id])
+
+  // Datos antropométricos y de salud
+  birthDate     DateTime?
+  sex           String?       // "M" | "F"
+  heightCm      Int?
+  startWeight   Float?
+  currentWeight Float?
+  targetWeight  Float?
+  activityLevel Float?        @default(1.2) // 1.2 sedentario .. 1.9 muy activo
+  goal          String?       @default("perder") // perder | mantener | ganar
+
+  // Restricciones y preferencias (JSON de strings)
+  allergies     Json?         // ["frutos secos", "lactosa"]
+  dislikes      Json?         // ["legumbres"]
+  dietType      String?       // "vegana" | "baja en sal" | "cetogénica" ...
+
+  // Datos administrativos / de consulta
+  dni           String?
+  phone         String?
+  dietWeeks     Int?          // duración estimada de la dieta en semanas
+  paid          Boolean       @default(false)
+  amountPaid    Float?
+  nextAppt      String?       // texto visible "15 jul · 10:00"
+
+  // Autoseguimiento del paciente
+  mealsDone     Json?         @default("{}") // {"semana|dia|tipo": true}
+  waterToday    Int           @default(0)
+  waterDate     String?       // "YYYY-MM-DD" para reiniciar cada día
+  medicacion    Json?         @default("[]") // nombres de fármacos
+
+  trafficLight  TrafficLight  @default(green)
+  weekNumber    Int           @default(1)
+  isActive      Boolean       @default(true)
+  preferredStore  String?
+  consentAccepted Boolean     @default(false)
+  consentAt       DateTime?
+  consentVersion  String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  weights       WeightRecord[]
+  assignments   PatientDietAssignment[]
+  questions     PatientQuestion[]
+  notes         PrivateNote[]
+  shoppingLists ShoppingList[]
+  appointments  Appointment[]
+  mensajes      Mensaje[]
+  // Baja con conservación legal de la historia clínica (Ley 41/2002: mínimo 5 años)
+  archivedAt      DateTime?
+  retainUntil     DateTime?
+  clinicalRecord  ClinicalRecord?
+  clinicalHistory ClinicalRecordHistory[]
+  checkins        WeeklyCheckin[]
+  measurements    BodyMeasurement[]
+}
+
+model Appointment {
+  id        String   @id @default(uuid())
+  patientId String
+  patient   Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  clinicId  String?
+  date      String   // "YYYY-MM-DD"
+  time      String   // "10:00"
+  note         String?
+  reminderSent Boolean  @default(false)
+  reminder1hSent Boolean @default(false) // aviso una hora antes
+  status       String   @default("pendiente") // pendiente | confirmada | cancelada (por el paciente)
+  respondedAt  DateTime?
+  createdAt    DateTime @default(now())
+
+  @@index([patientId])
+  @@index([date])
+}
+
+model WeightRecord {
+  id         String   @id @default(uuid())
+  patientId  String
+  patient    Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  weight     Float
+  recordedAt DateTime @default(now())
+  notes      String?
+
+  @@index([patientId])
+}
+
+// ── Banco de comidas reutilizables ──
+model MealBank {
+  id          String   @id @default(uuid())
+  clinicId    String?
+  clinic      Clinic?  @relation(fields: [clinicId], references: [id])
+  mealType    MealType
+  name        String
+  calories    Int      @default(0)
+  composicion Json?      // [{nombre, gramos}] para nutrición real
+  ingredients Json     @default("[]") // [{nombre, cantidad, unidad, categoria}]
+  tags        Json     @default("[]") // ["vegano", "sin gluten"]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([mealType])
+}
+
+// ── Recetas ──
+model Recipe {
+  id          String   @id @default(uuid())
+  clinicId    String?
+  clinic      Clinic?  @relation(fields: [clinicId], references: [id])
+  name        String
+  calories    Int      @default(0)
+  prepTime    String?
+  servings    Int      @default(2)
+  ingredients Json     @default("[]")
+  steps       Json     @default("[]")
+  tags        Json     @default("[]")
+  source      String   @default("manual") // manual | ia | web
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ── Dieta semanal ──
+model WeeklyDiet {
+  id          String            @id @default(uuid())
+  clinicId    String?
+  clinic      Clinic?           @relation(fields: [clinicId], references: [id])
+  name        String
+  description String?
+  targetKcal  Int?
+  source      String            @default("manual") // manual | ia
+  isActive    Boolean           @default(true)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  meals       WeeklyDietMeal[]
+  assignments PatientDietAssignment[]
+}
+
+// Una fila = una comida de un día concreto
+model WeeklyDietMeal {
+  id           String     @id @default(uuid())
+  weeklyDietId String
+  weeklyDiet   WeeklyDiet @relation(fields: [weeklyDietId], references: [id], onDelete: Cascade)
+  weekNumber   Int        @default(1)
+  dayName      String     // "Lunes" .. "Domingo"
+  mealType     MealType
+  mealName     String
+  calories     Int        @default(0)
+  ingredients  Json       @default("[]")
+
+  @@index([weeklyDietId])
+}
+
+model PatientDietAssignment {
+  id           String     @id @default(uuid())
+  patientId    String
+  patient      Patient    @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  weeklyDietId String
+  weeklyDiet   WeeklyDiet @relation(fields: [weeklyDietId], references: [id], onDelete: Cascade)
+  startDate    DateTime   @default(now())
+  isCurrent    Boolean    @default(true)
+
+  @@index([patientId])
+}
+
+// ── Comunicación ──
+model PatientQuestion {
+  id         String          @id @default(uuid())
+  patientId  String
+  patient    Patient         @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  text       String
+  isAnswered Boolean         @default(false)
+  createdAt  DateTime        @default(now())
+  replies    QuestionReply[]
+
+  @@index([patientId])
+}
+
+model QuestionReply {
+  id         String          @id @default(uuid())
+  questionId String
+  question   PatientQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  text       String
+  createdAt  DateTime        @default(now())
+}
+
+model PrivateNote {
+  id        String   @id @default(uuid())
+  patientId String
+  patient   Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  text      String
+  createdAt DateTime @default(now())
+
+  @@index([patientId])
+}
+
+// ── Lista de la compra ──
+model ShoppingList {
+  id           String         @id @default(uuid())
+  patientId    String
+  patient      Patient        @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  weeklyDietId String?
+  weekLabel    String?
+  createdAt    DateTime       @default(now())
+  items        ShoppingItem[]
+}
+
+model ShoppingItem {
+  id             String       @id @default(uuid())
+  shoppingListId String
+  shoppingList   ShoppingList @relation(fields: [shoppingListId], references: [id], onDelete: Cascade)
+  name           String
+  category       String       @default("Otros")
+  quantity       String?
+  isChecked      Boolean      @default(false)
+}
+
+// ── Contenido ──
+model Faq {
+  id        String  @id @default(uuid())
+  clinicId  String?
+  clinic    Clinic? @relation(fields: [clinicId], references: [id])
+  question  String
+  answer    String
+  sortOrder Int     @default(0)
+  isActive  Boolean @default(true)
+}
+
+model Resource {
+  id           String  @id @default(uuid())
+  clinicId     String?
+  clinic       Clinic? @relation(fields: [clinicId], references: [id])
+  title        String
+  description  String?
+  resourceType String  @default("pdf")
+  fileUrl      String?
+  isPublic     Boolean @default(true)
+}
+
+// ── Registro de uso y coste de la IA ──
+model AiUsage {
+  id           String   @id @default(uuid())
+  endpoint     String
+  model        String
+  inputTokens  Int      @default(0)
+  outputTokens Int      @default(0)
+  costUsd      Float    @default(0)
+  latencyMs    Int      @default(0)
+  approved     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+// ── Registro de auditoría (trazabilidad RGPD) ──
+
+// ── Registro de auditoría (quién accede/modifica qué) ──
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?
+  userRole   String?
+  action     String
+  targetType String?
+  targetId   String?
+  ip         String?
+  detail     String?
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([userId])
+}
+
+// ── Suscripciones a notificaciones push (por dispositivo) ──
+model PushSubscription {
+  id        String   @id @default(uuid())
+  userId    String
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ── Catálogo: producto real por supermercado para cada ingrediente ──
+model StoreProduct {
+  id          String   @id @default(uuid())
+  ingredient  String   // nombre canónico en minúsculas (ej. "leche")
+  store       String   // Mercadona, DÍA, Carrefour, Lidl, Alcampo
+  productName String
+  createdAt   DateTime @default(now())
+
+  @@unique([ingredient, store])
+  @@index([store])
+}
+
+// ── Base de datos de alimentos (valores por 100 g, ref. BEDCA) ──
+model Alimento {
+  id         String  @id @default(uuid())
+  nombre     String
+  categoria  String
+  kcal       Float
+  proteinas  Float
+  hidratos   Float
+  azucares   Float
+  grasas     Float
+  grasasSat  Float
+  fibra      Float
+  sal        Float   // g
+  calcio     Float   // mg
+  hierro     Float   // mg
+  vitD       Float   // µg
+  b12        Float   // µg
+  potasio    Float   // mg
+
+  @@unique([nombre])
+  @@index([categoria])
+}
+
+// ── Fármacos e interacciones fármaco-nutriente ──
+model Farmaco {
+  id             String   @id @default(uuid())
+  nombre         String   @unique
+  principioActivo String
+  grupo          String
+  interacciones  Json     // [{nutriente, alimentos:[], tipo, severidad:'baja|media|alta', recomendacion}]
+  createdAt      DateTime @default(now())
+
+  @@index([grupo])
+}
+
+// ── Chat dietista-paciente (conversación = paciente) ──
+model Mensaje {
+  id         String   @id @default(uuid())
+  patientId  String
+  patient    Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  senderId   String
+  senderRole String   // 'patient' | 'medico' | 'admin'
+  texto      String
+  leido      Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([patientId, createdAt])
+}
+
+// ── Registro RGPD (sin datos personales del afectado) ──
+model GdprLog {
+  id         String   @id @default(uuid())
+  action     String   // 'export' | 'delete'
+  actorRole  String
+  actorId    String
+  targetType String   // 'patient' | 'self'
+  createdAt  DateTime @default(now())
+}
+
+// ── Historia clínica (anamnesis) ──
+model ClinicalRecord {
+  id        String   @id @default(uuid())
+  patientId String   @unique
+  patient   Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  data      Json
+  updatedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Cada guardado deja una versión: trazabilidad de quién cambió la historia y cuándo
+model ClinicalRecordHistory {
+  id        String   @id @default(uuid())
+  patientId String
+  patient   Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  data      Json
+  savedBy   String?
+  savedAt   DateTime @default(now())
+
+  @@index([patientId, savedAt])
+}
+
+// ── Revisión semanal del paciente (escala 1-5: cuanto más alto, mejor) ──
+// ── Composición corporal: perímetros, % de grasa y masa muscular ──
+model BodyMeasurement {
+  id           String   @id @default(uuid())
+  patientId    String
+  patient      Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  recordedDate DateTime @default(now())
+  waistCm      Float?
+  hipCm        Float?
+  chestCm      Float?
+  armCm        Float?
+  thighCm      Float?
+  bodyFatPct   Float?
+  muscleMassKg Float?
+
+  @@index([patientId])
+}
+
+model WeeklyCheckin {
+  id           String   @id @default(uuid())
+  patientId    String
+  patient      Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  weekStart    String   // lunes de la semana, "YYYY-MM-DD"
+  energia      Int
+  hambre       Int      // 1 = mucha hambre · 5 = saciada
+  sueno        Int
+  cumplimiento Int
+  animo        Int?
+  nota         String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([patientId, weekStart])
+}
+
+// ── Límites de intentos (inicio de sesión, recuperar contraseña, chat…) ──
+// Compartidos entre todas las instancias del servidor. La clave es un resumen
+// (hash) de la IP o el correo: no se guarda ningún dato personal en claro.
+model RateLimit {
+  key          String    @id
+  count        Int       @default(0)
+  windowStart  DateTime  @default(now())
+  blockedUntil DateTime?
+
+  @@index([windowStart])
+}
