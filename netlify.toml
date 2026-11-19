@@ -1,0 +1,33 @@
+"$schema" = "https://open-api.netlify.com/netlify.schema.json"
+
+# ================================================================
+# NUSAL en Netlify
+#   · public/              → la app (ya compilada)
+#   · netlify/functions/   → el servidor: API (/api/*), recordatorios y mantenimiento
+#   · Base de datos        → Supabase (variables de entorno en Netlify, nunca aquí)
+# En cada despliegue: se prepara Prisma y se crean/actualizan las tablas,
+# el blindaje (RLS) y los datos iniciales en Supabase.
+# ================================================================
+[build]
+  command = "npm run build"
+  publish = "public"
+  # Si marcas las variables como secretas, Netlify revisa que su valor no aparezca en el código.
+  # Estas no son secretas y su valor puede coincidir con textos de la app (p. ej. "production" o el correo de la consulta).
+  environment = { NODE_VERSION = "22", PRISMA_HIDE_UPDATE_MESSAGE = "1", SECRETS_SCAN_OMIT_KEYS = "NODE_ENV,ADMIN_EMAIL,MEDICO_EMAIL,MEDICO_NAME" }
+
+# Las vistas previas y las ramas usarían la base de datos REAL: desactivadas a propósito
+[context.deploy-preview]
+  command = "echo 'NUSAL: vistas previas desactivadas (usarían la base de datos real)' && exit 1"
+
+[context.branch-deploy]
+  command = "echo 'NUSAL: despliegues de ramas desactivados (usarían la base de datos real)' && exit 1"
+
+[functions]
+  directory = "netlify/functions"
+  # Motor de base de datos en WebAssembly (se lee desde disco: hay que incluirlo en el paquete)
+  included_files = [
+    "node_modules/.prisma/client/query_engine_bg.wasm",
+    "node_modules/.prisma/client/query_engine_bg.js",
+    "node_modules/.prisma/client/wasm.js",
+    "node_modules/.prisma/client/package.json",
+  ]
